@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.interpolate import interp1d
 import configparser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -15,7 +14,14 @@ class LUTEditor:
         """Carica i dati da un file LUT."""
         try:
             with open(self.file_path, 'r') as file:
-                return np.loadtxt(file)
+                # Legge il file riga per riga
+                data = []
+                for line in file:
+                    line = line.strip()  # Rimuove spazi e newline
+                    if line:  # Ignora righe vuote
+                        input_val, output_val = line.split('|')  # Divide la riga in base al pipe
+                        data.append((float(input_val), float(output_val)))  # Converte in float
+                return np.array(data)  # Restituisce un array numpy
         except Exception as e:
             messagebox.showerror("Errore", f"Impossibile caricare il file LUT: {e}")
             return np.array([])
@@ -24,7 +30,8 @@ class LUTEditor:
         """Salva i dati in un file LUT."""
         try:
             with open(self.file_path, 'w') as file:
-                np.savetxt(file, data)
+                for input_val, output_val in data:
+                    file.write(f"{int(input_val)}|{int(output_val)}\n")  # Salva nel formato corretto
             messagebox.showinfo("Successo", "File LUT salvato correttamente.")
         except Exception as e:
             messagebox.showerror("Errore", f"Impossibile salvare il file LUT: {e}")
@@ -44,6 +51,7 @@ class LUTEditor:
 
         # Funzione per catturare i click del mouse e aggiornare i punti
         def onclick(event):
+            nonlocal x, y  # Rende x e y accessibili all'interno di questa funzione
             if event.inaxes is not None:
                 new_x, new_y = event.xdata, event.ydata
                 x = np.append(x, new_x)
@@ -85,41 +93,119 @@ class EngineEditor:
             messagebox.showerror("Errore", f"Impossibile salvare il file engine.ini: {e}")
 
 
-# Classe per gestire la visualizzazione dei valori del cambio
+# Classe per gestire la visualizzazione e modifica dei valori del cambio
 class GearboxViewer:
     def __init__(self, file_path):
         self.file_path = file_path
-        self.config = configparser.ConfigParser()
+        self.config = configparser.ConfigParser(interpolation=None)  # Disabilita l'interpolazione
+        self.edited_values = {}  # Dizionario per memorizzare le modifiche
 
-    def load_gearbox_values(self):
-        """Carica i valori del cambio da un file INI."""
+    def load_drivetrain_ini(self):
+        """Carica le sezioni [GEARS], [DIFFERENTIAL], [GEARBOX] dal file drivetrain.ini."""
         try:
             self.config.read(self.file_path)
-            if 'GEARBOX' in self.config:
-                return dict(self.config['GEARBOX'])
-            return {}
+            # Carica le sezioni (se presenti)
+            self.gears = dict(self.config['GEARS']) if 'GEARS' in self.config else {}
+            self.differential = dict(self.config['DIFFERENTIAL']) if 'DIFFERENTIAL' in self.config else {}
+            self.gearbox = dict(self.config['GEARBOX']) if 'GEARBOX' in self.config else {}
         except Exception as e:
-            messagebox.showerror("Errore", f"Impossibile caricare i valori del cambio: {e}")
-            return {}
+            messagebox.showerror("Errore", f"Impossibile caricare il file drivetrain.ini: {e}")
+            self.gears, self.differential, self.gearbox = {}, {}, {}
 
-    def display_gearbox_values(self):
-        """Mostra i valori del cambio in una finestra."""
-        gearbox_values = self.load_gearbox_values()
-        if not gearbox_values:
+    def display_drivetrain_values(self):
+        """Mostra i valori delle sezioni [GEARS], [DIFFERENTIAL], [GEARBOX] in una finestra."""
+        self.load_drivetrain_ini()
+        if not self.gears and not self.differential and not self.gearbox:
             return
 
-        root = tk.Tk()
-        root.title("Valori del Cambio")
+        # Creazione della finestra principale
+        self.root = tk.Tk()
+        self.root.title("Modifica Drivetrain.ini")
 
-        tree = ttk.Treeview(root, columns=('Gear', 'Value'), show='headings')
-        tree.heading('Gear', text='Marcia')
+        # Creazione di un notebook per le schede
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(expand=True, fill='both')
+
+        # Aggiungi una scheda per ogni sezione
+        if self.gears:
+            self.add_section_tab("GEARS", self.gears)
+        if self.differential:
+            self.add_section_tab("DIFFERENTIAL", self.differential)
+        if self.gearbox:
+            self.add_section_tab("GEARBOX", self.gearbox)
+
+        # Pulsante per salvare le modifiche
+        btn_save = ttk.Button(self.root, text="Salva Modifiche", command=self.save_changes)
+        btn_save.pack(pady=10)
+
+        self.root.mainloop()
+
+    def add_section_tab(self, section_name, section_data):
+        """Aggiunge una scheda per una sezione specifica."""
+        frame = ttk.Frame(self.notebook)
+        self.notebook.add(frame, text=section_name)
+
+        # Creazione della Treeview per la sezione
+        tree = ttk.Treeview(frame, columns=('Key', 'Value'), show='headings', selectmode='browse')
+        tree.heading('Key', text='Chiave')
         tree.heading('Value', text='Valore')
+        tree.column('Key', width=150, anchor='w')
+        tree.column('Value', width=150, anchor='w')
 
-        for gear, value in gearbox_values.items():
-            tree.insert('', 'end', values=(gear, value))
+        # Inserimento dei dati
+        for key, value in section_data.items():
+            tree.insert('', 'end', values=(key, value))
 
         tree.pack(expand=True, fill='both')
-        root.mainloop()
+
+        # Binding per la modifica delle celle
+        tree.bind('<Double-1>', lambda e, t=tree, s=section_name: self.on_double_click(e, t, s))
+
+    def on_double_click(self, event, tree, section_name):
+        """Gestisce il doppio click per modificare il valore nella colonna 'Value'."""
+        item_id = tree.focus()
+        if not item_id:
+            return
+
+        column = tree.identify_column(event.x)
+        if column == '#2':  # Solo la colonna 'Value' è modificabile
+            key, old_value = tree.item(item_id, 'values')
+            x, y, width, height = tree.bbox(item_id, column)
+
+            # Creazione di un Entry per la modifica
+            entry = tk.Entry(tree)
+            entry.insert(0, old_value)
+            entry.focus()
+
+            def on_return(event):
+                new_value = entry.get()
+                tree.set(item_id, column='Value', value=new_value)
+                self.edited_values[(section_name, key)] = new_value  # Salva la modifica
+                entry.destroy()
+
+            entry.bind("<Return>", on_return)
+            entry.bind("<Escape>", lambda e: entry.destroy())
+            entry.place(x=x, y=y, width=width, height=height)
+
+    def save_changes(self):
+        """Salva le modifiche apportate al file drivetrain.ini."""
+        if not self.edited_values:
+            messagebox.showinfo("Nessuna Modifica", "Non sono state effettuate modifiche.")
+            return
+
+        # Applica le modifiche al config
+        for (section, key), new_value in self.edited_values.items():
+            if section in self.config:
+                self.config[section][key] = new_value
+
+        # Salva il file
+        try:
+            with open(self.file_path, 'w') as configfile:
+                self.config.write(configfile)
+            messagebox.showinfo("Successo", "Modifiche salvate correttamente!")
+            self.edited_values.clear()  # Resetta le modifiche
+        except Exception as e:
+            messagebox.showerror("Errore", f"Impossibile salvare il file: {e}")
 
 
 # Interfaccia grafica principale
@@ -135,7 +221,7 @@ class AssettoCorsaManagerApp:
 
         self.notebook.add(self.tab_lut, text="Modifica LUT")
         self.notebook.add(self.tab_engine, text="Engine.ini")
-        self.notebook.add(self.tab_gearbox, text="Cambio")
+        self.notebook.add(self.tab_gearbox, text="Drivetrain.ini")
 
         self.notebook.pack(expand=True, fill='both')
 
@@ -160,11 +246,11 @@ class AssettoCorsaManagerApp:
         ttk.Button(frame, text="Aggiungi Curva di Torque", command=self.add_torque_curve).pack(pady=5)
 
     def setup_gearbox_tab(self):
-        """Configura la scheda per la visualizzazione del cambio."""
-        frame = ttk.LabelFrame(self.tab_gearbox, text="Valori del Cambio")
+        """Configura la scheda per la modifica del drivetrain.ini."""
+        frame = ttk.LabelFrame(self.tab_gearbox, text="Drivetrain.ini")
         frame.pack(fill='both', expand=True, padx=10, pady=10)
 
-        ttk.Button(frame, text="Carica Valori del Cambio", command=self.display_gearbox_values).pack(pady=5)
+        ttk.Button(frame, text="Carica Drivetrain.ini", command=self.display_drivetrain_values).pack(pady=5)
 
     def load_lut(self):
         """Carica un file LUT."""
@@ -195,12 +281,12 @@ class AssettoCorsaManagerApp:
         else:
             messagebox.showwarning("Attenzione", "Nessun file engine.ini caricato.")
 
-    def display_gearbox_values(self):
-        """Mostra i valori del cambio."""
+    def display_drivetrain_values(self):
+        """Mostra i valori del drivetrain.ini."""
         file_path = filedialog.askopenfilename(filetypes=[("INI files", "*.ini")])
         if file_path:
             gearbox_viewer = GearboxViewer(file_path)
-            gearbox_viewer.display_gearbox_values()
+            gearbox_viewer.display_drivetrain_values()
 
 
 # Avvio dell'applicazione
